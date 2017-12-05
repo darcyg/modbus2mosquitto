@@ -1,0 +1,151 @@
+#include<stdio.h>
+#include<stdlib.h>
+#include<unistd.h>
+#include<pthread.h>
+#include<errno.h>
+#include<semaphore.h>
+#include<fcntl.h>
+#include<string.h>
+
+#include"msgsps_common.h"
+#include"mosquitto.h"
+#include"modbus.h"
+
+
+time_t end_time;
+sem_t modgo,mosgo; //设置信号量，分别控制modbus采集和mosquitto发送
+
+/*mosquitto全局变量定义*/
+static bool run = true; //mosquitto连接情况
+static int message_count = 0;
+
+/*modbus全局变量定义*/
+uint16_t *tab_rp_registers; //存放采集数据的位置指针
+const uint16_t UT_REGISTERS_NB = 200; //采集的数据数
+
+
+void pthread1_modbus_collect(void *arg);
+void pthread2_mosquitto_publish(void *arg);
+
+/* mosquitto callback function definition*/
+
+void my_connect_callback(struct mosquitto *mosq, void *obj, int rc)
+{
+    printf("rc:%d\n",rc);
+}
+
+void my_disconnect_callback(struct mosquitto *mosq, void *obj, int result)
+{
+    run = false;
+}
+
+void my_publish_callback(struct mosquitto *mosq, void *obj, int mid)
+{
+    message_count++;
+    if (message_count == MESSAGE_COUNT){
+        mosquitto_disconnect((struct mosquitto *)obj);
+    }
+}
+int main(int argc, char *argv[])
+{
+    pthread_t id1,id2;
+    int ret;
+	end_time = time(NULL) + 10;//结束时间永远大于当前时间，作为后面循环的判断条件
+/*为存放数据的指针申请内存*/
+    tab_rp_registers = (uint16_t *) malloc(UT_REGISTERS_NB * sizeof(uint16_t));//分配相应数量的地址空间
+    memset(tab_rp_registers,0,UT_REGISTERS_NB * sizeof(uint16_t));//将初始值设置为0
+
+/*初始化信号量*/
+    ret = sem_init(&modgo,0,1);
+    if(ret != 0) perror("sem_init");
+    ret = sem_init(&mosgo,0,0);
+    if(ret != 0) perror("sem_init");
+/*创建两个线程*/
+    ret = pthread_create(&id1,NULL,(void *)pthread1_modbus_collect,NULL);
+    if(ret != 0)
+        perror("pthread modbus");
+    ret = pthread_create(&id2,NULL,(void *)pthread2_mosquitto_publish,NULL);
+    if(ret != 0)
+        perror("pthread musquitto");
+/*释放分配的内存空间*/
+    free(tab_rp_registers);
+
+    pthread_join(id1,NULL);
+    pthread_join(id2,NULL);
+    exit(0);
+    //return 0;
+}
+
+void pthread1_modbus_collect(void *arg)  //该线程设置成void or int的，那个比较好？
+{
+    //选择Modbus采集方式：TCP（1）or RTU(0)
+    static int mod = 0;//modbus 通讯协议的选择 0是RTU，1是TCP，默认是RTU
+
+	modbus_t *ctx;
+	if (0 == mod)
+		ctx = modbus_new_rtu("/dev/ttyUSB0", 9600, 'N', 8, 1);//RS485
+	else if (1 == mod)
+		ctx = modbus_new_tcp("192.168.1.15", 502);
+	else{
+		printf("this is not a correct Modbus communication way.PLease choose RTU(0) or TCP(1)");
+	}
+	if (ctx == NULL)
+	{
+		printf("Unable to allocate libmodbus context\n");
+		exit(1);
+		//return -1;
+	}
+
+	modbus_set_debug(ctx, FALSE); //  应该是输出一些调试信息
+	int slaveID = 1;
+	modbus_set_slave(ctx, slaveID);
+
+	if (-1 == modbus_connect(ctx))
+	{
+		printf("Connect failed!!!\n");
+		modbus_free(ctx);
+		exit(1);
+		//return -1;
+	}
+	//分配地址空间和采点位置
+	int rc;
+	const uint16_t UT_REGISTERS_ADDRESS = 10; //采集的地址处
+    while(time(NULL) < end_time)
+    {
+/*信号量操作*/
+    sem_wait(&modgo);
+    rc = modbus_read_input_registers(ctx,UT_REGISTERS_ADDRESS,MESSAGE_SIZE,tab_rp_registers);
+    printf("modbus read input registers:");
+    if(rc != 1){
+        printf("FAILED (nb points %d)\n",rc);
+        goto close;
+    }
+    printf("OUTPUT:");
+    int i = 0;
+    for(i =0; i<MESSAGE_SIZE; i++)
+    {
+        printf("%d\n",tab_rp_registers[i]);
+    }
+/*信号量操作*/
+    sem_post(&mosgo);
+    }
+close:
+	modbus_close(ctx);     //内存的问题还有待更好的调配代码
+	modbus_free(ctx);
+
+    exit(0);
+}
+
+
+void pthread2_mosquitto_publish(void *arg)
+{
+    int i;
+	struct mosquitto *mosq;
+	mosquitto_lib_init();
+
+	mosq = mosquitto_new("perftest", true, NULL);
+	mosquitto_connect_callback_set(mosq, my_connect_callback);
+	mosquitto_disconnect_callback_set(mosq, my_disconnect_callback);
+	mosquitto_publish_callback_set(mosq, my_publish_callback);
+
+	mosquitto_connect(mosq, "192.168.1.250", 1883, 
