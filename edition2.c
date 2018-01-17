@@ -12,8 +12,9 @@
 #include <mosquitto.h>
 #include<modbus.h>
 
-#include "client_shared.h"
+#include "client_shared.h" //mosq_config的定义在这里
 
+pthread_mutex_t mutex;
 //******************************MQTT配置信息***********************************************************************************************
 typedef enum { ASCII, UTF_8 }ENCODE;
 typedef struct
@@ -156,6 +157,7 @@ void buildCtrl()
 }
 void buildWaitTab()
 {
+	pthread_mutex_lock(&mutex);//cmpData是临界资源，先上个锁
 	int i, k;
 
 	if (firstPubFlag || recevidMessage_T)
@@ -188,6 +190,7 @@ void buildWaitTab()
 			}
 		}
 	}
+	pthread_mutex_unlock(&mutex);//走出临界区，解锁
 }
 int sortConfig()
 {
@@ -654,6 +657,7 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 
 	for (i = 0; i<SumCount; i++)
 	{
+		pthread_mutex_lock(&mutex);//进入临界资源区，cmpData是临界资源，上锁
 		if (cmpData[i].isChange != 0)
 		{
 			cmpData[i].isChange = 0;//清除 改变标志
@@ -707,6 +711,7 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 			}
 			count++;			//变量数据体 计数
 		}
+		pthread_mutex_unlock(&mutex);
 	}
 	*countReturn = count;
 	message_H[7 + (Mqtt.Encoding * 4) + (Mqtt.Compress * 4)] = count >> 8;
@@ -787,6 +792,28 @@ int sendMessage_H()
 	return 1;
 	//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/H", strlen("H"), "H", 0, false); 测试用代码
 }
+int recMessage_download(struct mosquitto *mosq, const struct mosquitto_message *msg)
+{//尝试下载一个名为test的二进制文件
+	char* DownloadMsg;
+	DownloadMsg = msg->payload;
+	int j;
+	for (j = 0 ; j < msg->payloadlen; j++)
+	{
+		printf("%c", DownloadMsg[j]);
+	}
+	int i;//接收返回值
+	FILE *fp;
+	if ((fp = fopen("test", "w+b")) == NULL)//w+打开可读写文件，b：二进制
+	{
+		printf("Can't open file!");
+			exit(1);
+	}
+	i = fwrite(msg->payload,sizeof(char),msg->payloadlen, fp);
+	printf("input nmemb is %d\n", i);
+	fclose(fp);
+	return 0;
+
+}
 
 
 //*****************************回调函数们**************************************************
@@ -801,6 +828,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
 		mosquitto_subscribe(mosq, NULL, "LD/TTTTTT/S/D", 0);
 		mosquitto_subscribe(mosq, NULL, "LD/TTTTTT/S/T", 0);
 		mosquitto_subscribe(mosq, NULL, "LD/TTTTTT/S/L", 0);
+		mosquitto_subscribe(mosq, NULL, "download", 0);
 		sendMessage_A();
 		//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/A", strlen("message"), "message", 0, false); 测试用代码
 	}
@@ -827,6 +855,10 @@ void my_message_callback(struct mosquitto *mosq, void *obj, const struct mosquit
 	else if (strcmp(msg->topic, "LD/TTTTTT/S/L") == 0)
 	{
 		recevidMessage_L = 1;
+	}
+	else if (strcmp(msg->topic,"download") == 0)
+	{
+		recMessage_download(mosq, msg);
 	}
 	else
 	{
@@ -884,10 +916,10 @@ int main(int argc, char *argv[])
 		return rc;
 	}
 
-	//while (!firstGetFinishFlag)
-	//{
-	//	MySleep(1000);//在第一次采集完成之前，一直等待
-	//}
+	while (!firstGetFinishFlag)
+	{
+		MySleep(1000);//在第一次采集完成之前，一直等待
+	}
 
 	while (run == -1){
 		mosquitto_loop(mosq, -1, 1);
