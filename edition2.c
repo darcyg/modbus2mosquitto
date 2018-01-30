@@ -144,7 +144,7 @@ void swap(int *a, int *b)
 }
 
 
-void buildCtrl()
+void buildCtrl(void)
 {
 	CTRL[1] = 0;//控制字高8位 预留
 	CTRL[0] = 0;//控制字低8位 加密2 压缩格式2 编码2 格式2
@@ -155,7 +155,44 @@ void buildCtrl()
 	if (Mqtt.Encoding == 1)
 		CTRL[0] += 4;
 }
-void buildWaitTab()
+void buildWaitTab_D(void)
+{
+	pthread_mutex_lock(&mutex);//cmpData是临界资源，先上个锁
+	int i, k;
+
+	if (firstPubFlag)
+	{
+		for (i = 0; i<SumCount; i++)
+		{
+			cmpData[i].num = getData[i].num;
+			cmpData[i].length = getData[i].length;
+			cmpData[i].isChange = 1; //第一次全推送，相对而言全部数据发生变化
+			for (k = 0; k<cmpData[i].length; k++)
+				cmpData[i].value[k] = getData[i].value[k];
+		}
+	}
+	else 
+	{
+		for (i = 0; i<SumCount; i++)
+		{
+			cmpData[i].num = getData[i].num;//考虑删掉
+			cmpData[i].length = getData[i].length;
+			if (memcmp(&(cmpData[i].value), &(getData[i].value), sizeof(unsigned int)*(cmpData[i].length)))//与上次采集的数据不一样
+			{
+				cmpData[i].isChange += 1;// isChange是只有0和1的变化吗？是的，在builidMessageH()函数中，有将isChange重新置0
+				//将发生变化的数据存入等待上传表
+				for (k = 0; k<cmpData[i].length; k++)
+					cmpData[i].value[k] = getData[i].value[k];
+			}
+			else
+			{
+				cmpData[i].isChange += 0;
+			}
+		}
+	}
+	pthread_mutex_unlock(&mutex);//走出临界区，解锁
+}
+void buildWaitTab_T(void)
 {
 	pthread_mutex_lock(&mutex);//cmpData是临界资源，先上个锁
 	int i, k;
@@ -192,7 +229,7 @@ void buildWaitTab()
 	}
 	pthread_mutex_unlock(&mutex);//走出临界区，解锁
 }
-int sortConfig()
+int sortConfig(void)
 {
 	int i = 0;
 	int j = 0, k = 0;
@@ -261,7 +298,7 @@ int sortConfig()
 }
 
 #define MAX_LINE_LEN 1000
-int readConfig()
+int readConfig(void)
 {
 	char line[MAX_LINE_LEN] = { 0 };   //临时存放配置信息的
 	FILE *fp = fopen("config.txt", "r");
@@ -531,7 +568,7 @@ int getModbusData(void *arg)
 		//printf("\n#############################################################\n");
 		//TODO
 		firstGetFinishFlag = 1;//第一次采采集完成
-		buildWaitTab();
+		buildWaitTab_T();
 	}
 	return 1;
 }
@@ -560,7 +597,7 @@ void buildMessage_A(char frameType, char ctrl[2], int data)
 	printf("\n");*/
 	//return rc;
 }
-void sendMessage_A()
+void sendMessage_A(void)
 {
 	FRAMETYPE = 0x01;//帧类别
 	buildCtrl();//生成控制字
@@ -570,12 +607,20 @@ void sendMessage_A()
 	pubmsgA.payloadlen = sizeof(PAYLOAD_A);
 	pubmsgA.qos = 1;
 	pubmsgA.retain = 0;//服务器端必须存储这个应用消息和它的服务质量等级（qos），以便它可以被分发给未来的主题名匹配的订阅者
+	
+	int i;
+	printf("This is messageA:\n");
+	for (i = 0; i < 7; i++)
+	{
+		printf("%x\n", PAYLOAD_A[i]);
+	}
+
 	mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/A", pubmsgA.payloadlen, pubmsgA.payload, pubmsgA.qos, pubmsgA.retain);
 
 }
 
 //构建上传数据 C
-char* buildJson()
+char* buildJson(void)
 {
 	int i;
 	int offsetC = 0;
@@ -657,7 +702,7 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 
 	for (i = 0; i<SumCount; i++)
 	{
-		pthread_mutex_lock(&mutex);//进入临界资源区，cmpData是临界资源，上锁
+		pthread_mutex_lock(&mutex);//进入临界资源区，cmpData是临界资源，上锁****这个锁加在for循环外面会不会更好？？？
 		if (cmpData[i].isChange != 0)
 		{
 			cmpData[i].isChange = 0;//清除 改变标志
@@ -679,7 +724,7 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 			}
 			//upLoadDataType = valueTab[cmpData[i].num-1].DataType; 
 			//message_H[j++] = upLoadDataType & 0xFF;//变量类型
-			if (cmpData[i].num - 1>80)
+			if (cmpData[i].num - 1>80)//这句话应该是仅仅针对变量表是82个变量而来的。
 				printf("%d %d\n", cmpData[i].num, valueTab[cmpData[i].num].DataType);//不知道这是干什么？
 			message_H[j++] = valueTab[cmpData[i].num - 1].DataType;//变量类型
 
@@ -714,8 +759,8 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 		pthread_mutex_unlock(&mutex);
 	}
 	*countReturn = count;
-	message_H[7 + (Mqtt.Encoding * 4) + (Mqtt.Compress * 4)] = count >> 8;
-	message_H[8 + (Mqtt.Encoding * 4) + (Mqtt.Compress * 4)] = count & 0xFF;
+	message_H[7 + (Mqtt.Encrypt * 4) + (Mqtt.Compress * 4)] = count >> 8;
+	message_H[8 + (Mqtt.Encrypt * 4) + (Mqtt.Compress * 4)] = count & 0xFF;
 	*length = j;
 	/*for(testA=0;testA<j;testA++)
 	{
@@ -726,11 +771,16 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 
 	return message_H;
 }
-void sendMessage_C()
+int sendMessage_C(void)
 {
 	struct mosquitto_message pubmsgC = { 0, NULL, NULL, 0, 0, 0 };
-	//MQTTAsync_message pubmsgC = MQTTAsync_message_initializer;	//消息C	变量表发送
-	char* TOPIC_C = (char*)malloc(sizeof(char)* 30);	//变量表发送
+	char* TOPIC_C = NULL;
+	TOPIC_C = (char*)malloc(sizeof(char)* 30);	//变量表发送
+	if (TOPIC_C == NULL)
+	{
+		perror("malloc");
+		return -1;
+	}
 	char* PAYLOAD_C;
 	int length;
 	sprintf(TOPIC_C, "%s/%s/P/C", Mqtt.Project_name, Mqtt.UniCode);
@@ -743,16 +793,35 @@ void sendMessage_C()
 	pubmsgC.qos = 1;
 	pubmsgC.retain = 0;
 
-	mosquitto_publish(mosq, NULL, "LD/TTTTTT/P/C", pubmsgC.payloadlen, pubmsgC.payload, pubmsgC.qos, pubmsgC.retain);
+	printf("This is meaasgeC:\n");
+	int i;
+	for (i = 0; i < 3; i++)
+	{
+		printf("%x\n", PAYLOAD_C[i]);
+	}
+	for (i = 3; i < length - 3; i++)
+	{
+		printf("%c", PAYLOAD_C[i]);
+	}
+
+	mosquitto_publish(mosq, NULL, TOPIC_C, pubmsgC.payloadlen, pubmsgC.payload, pubmsgC.qos, pubmsgC.retain);
+	free(TOPIC_C);
+	return 1;
 	//等待一分钟  先改为1s
 	//MySleep(1000*60)		
 	//	MySleep(1000);
 	//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/C", strlen("C"), "C", 0, false); 测试用代码
 }
-int sendMessage_H()
+int sendMessage_H(void)
 {
 	struct mosquitto_message pubmsgH = { 0, NULL, NULL, 0, 0, 0 };
-	char* TOPIC_H = (char*)malloc(sizeof(char)* 30);	//实时变量值上传
+	char*TOPIC_H = NULL;
+	TOPIC_H = (char*)malloc(sizeof(char)* 30);	//实时变量值上传
+	if (TOPIC_H == NULL)
+	{
+		perror("malloc");
+		return -1;
+	}
 	char* PAYLOAD_H;
 	int length;
 	int testA; 
@@ -761,8 +830,8 @@ int sendMessage_H()
 	firstPubFlag = 0;//	取消第一次推送标志
 	sprintf(TOPIC_H, "%s/%s/P/H", Mqtt.Project_name, Mqtt.UniCode);
 
-	FRAMETYPE = 0x0A;//FRAMETYPE = 0x03;
-	PAYLOAD_H = buildMessage_H(FRAMETYPE, CTRL, &length, &countReturn);
+	FRAMETYPE = 0x0A;
+	PAYLOAD_H = buildMessage_H(FRAMETYPE, CTRL, &length, &countReturn);//这是引用的用法吗？
 	printf("count = %d \n",countReturn);
 	
 
@@ -771,6 +840,8 @@ int sendMessage_H()
 		if (recevidMessage_T && (countReturn != SumCount)) return -1;
 		pubmsgH.payload = PAYLOAD_H;
 		pubmsgH.payloadlen = length;
+
+		printf("This is messageH:\n");
 		for (testA = 0; testA<length; testA++)
 		{
 			printf("<%d>", PAYLOAD_H[testA]);
@@ -780,17 +851,28 @@ int sendMessage_H()
 		pubmsgH.qos = 1;
 		pubmsgH.retain = 0;
 		mosquitto_publish(mosq, NULL, TOPIC_H, pubmsgH.payloadlen, pubmsgH.payload, pubmsgH.qos, pubmsgH.retain);
-		if (recevidMessage_T && (countReturn == SumCount)) {
-			recevidMessage_T = 0;
-			//printf("取消T\n");
-		}
+		///*if (recevidMessage_T && (countReturn == SumCount)) {
+		//	recevidMessage_T = 0;*/
+		//	//printf("取消T\n");
+		//}
 	}
 	else
 	{
 		//	printf("no message need to publish... \n");
 	}
+	free(TOPIC_H);
 	return 1;
 	//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/H", strlen("H"), "H", 0, false); 测试用代码
+}
+void response_D(void)
+{
+	while (recevidMessage_D == 1)
+	{
+		buildWaitTab_D();
+		sendMessage_H();
+		MySleep(5000);
+	}
+	recevidMessage_D = 0;
 }
 int recMessage_download(struct mosquitto *mosq, const struct mosquitto_message *msg)
 {//尝试下载一个名为test的二进制文件
@@ -835,7 +917,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
 }
 void on_publish(struct mosquitto *mosq, void *obj, int mid)
 {
-	printf("sent successfully");
+	printf("sent successfully!!\n");
 }
 
 void my_message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
@@ -877,7 +959,7 @@ void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
 int main(int argc, char *argv[])
 {
 
-	pthread_t id1;
+	pthread_t id1,id2;
 	readConfig();
 	pthread_create(&id1, NULL, (void *)getModbusData, NULL);
 	int rc;
@@ -931,15 +1013,26 @@ int main(int argc, char *argv[])
 			printf("send message C \n");
 
 		}
-		if ((recevidMessage_D == 1) || (recevidMessage_T == 1))
-		{//转发表中			实时数据
-			buildWaitTab();
-			recevidMessage_D = 0;
-			recevidMessage_T = 0;
+		if (recevidMessage_D == 1)
+		{
+			pthread_create(&id2, NULL, (void *)response_D, NULL);
+		}
+		if (recevidMessage_T == 1)
+		{
+			buildWaitTab_T();
 			sendMessage_H();
 			printf("send message H \n");
-
+			recevidMessage_T = 0;
 		}
+		//if ((recevidMessage_D == 1) || (recevidMessage_T == 1))
+		//{//转发表中			实时数据
+		//	buildWaitTab();
+		//	recevidMessage_D = 0;
+		//	recevidMessage_T = 0;
+		//	sendMessage_H();
+		//	printf("send message H \n");
+
+		//}
 		if (recevidMessage_L == 1)
 		{
 			recevidMessage_L = 0;
