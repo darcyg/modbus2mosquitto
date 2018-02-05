@@ -12,7 +12,7 @@
 #include <mosquitto.h>
 #include<modbus.h>
 
-#include "client_shared.h" //mosq_config的定义在这里
+//#include "client_shared.h" //mosq_config的定义在这里
 
 pthread_mutex_t mutex;
 //******************************MQTT配置信息***********************************************************************************************
