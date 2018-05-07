@@ -118,7 +118,7 @@ ModbusConfig Modbus = ModbusConfig_initializer;
 
 #define CONFIGLENGTH 200
 xmlChar* ConfigEdition;//配置文件版本信息
-xmlChar* ChannelEdition;//PLC变量版本号
+int ChannelEdition;//PLC变量表版本号
 unsigned char UniCode[6]="TTTTTT";//存放由ClientID转换而来的半幅序列号,赋初值为"TTTTTT"
 
 typedef enum {
@@ -331,10 +331,10 @@ void ReadXmlNodeElement_mqtt_server(xmlNodePtr cur)
 		xmlAttrPtr curAttrPtr = curNodePtr->properties;
 		while (curAttrPtr != NULL)
 		{
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Version"))			//找到对应元素的名称
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ConfigEdition"))			//找到对应元素的名称
 			{
 
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Version");
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"ConfigEdition");
 				ConfigEdition = temp;
 			}
 			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Remote_IP"))			//找到对应元素的名称
@@ -403,6 +403,11 @@ void ReadXmlNodeElement_modbus_client(xmlNodePtr cur)
 		xmlAttrPtr curAttrPtr = curNodePtr->properties;
 		while (curAttrPtr != NULL)
 		{
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ChannelEdition"))	
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"ChannelEdition");
+				ChannelEdition = atoi((char*)temp);   
+			}
 			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"SlaveID"))			//找到对应元素的名称
 			{
 				temp = xmlGetProp(curNodePtr, (const xmlChar*)"SlaveID");
@@ -923,7 +928,7 @@ int getModbusData(void *arg)
 
 
 // ******************************** 构建 消息内容 和 发送消息 函数****************************************************************
-void buildMessage_A(char frameType, char ctrl[2], int data) //版本信息由原先的int更改为char之后，这个函数该怎么修改呢？
+void buildMessage_A(char frameType, char ctrl[2], int data) //data是PLC变量表版本号
 {
 	int i;
 
@@ -949,7 +954,7 @@ void sendMessage_A(void)
 {
 	FRAMETYPE = 0x01;//帧类别
 	buildCtrl();//生成控制字
-	buildMessage_A(FRAMETYPE, CTRL, 23);//先暂时给个具体数，待修改
+	buildMessage_A(FRAMETYPE, CTRL, ChannelEdition);
 	struct mosquitto_message pubmsgA;
 	pubmsgA.payload = PAYLOAD_A;
 	pubmsgA.payloadlen = sizeof(PAYLOAD_A);
@@ -975,7 +980,7 @@ char* buildJson(void)
 	//char tempC[1000];//消息C 临时存放量 用来生成Json		<<<< buildJson
 	char* tempC;
 	tempC = (char*)malloc(sizeof(char)*(100 * SumCount + 29));//29为Json上下行的字节数，100为每行的字节数
-	offsetC += sprintf(tempC, "{\"ver\":%s,\"taglst\":[", ConfigEdition);//之前是Version，因为Version修改为char型的ConfigEdition了，不确定这样写对不对
+	offsetC += sprintf(tempC, "{\"ver\":%s,\"taglst\":[", ChannelEdition);
 	for (i = 0; i<SumCount; i++)
 		offsetC += sprintf(tempC + offsetC, "{\"nam\":\"%s\",\"dsc\":\"%s\",\"addr\":%d,\"vt\":%d},", valueTab[i].name, valueTab[i].desc, valueTab[i].num, valueTab[i].DataType);
 	offsetC += sprintf(tempC + offsetC - 1, "]}");
@@ -1305,7 +1310,7 @@ int recMessage_download_config(struct mosquitto *mosq, const struct mosquitto_me
 	char* DownloadMsg;
 	int  p_deviation;
 	DownloadMsg = msg->payload;
-	p_deviation = atoi(DownloadMsg[3]) +4 ;
+	p_deviation = atoi(&DownloadMsg[3]) +4 ;
 	int j;
 	for (j = 0; j < msg->payloadlen; j++)
 	{
