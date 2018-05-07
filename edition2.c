@@ -1,17 +1,21 @@
 /*
- *Date	：2018.1.5
- *Author: 王灏楠
- *
+*Date	：2018.4.10
+*Author: 王灏楠
+*Update: 完善配置文件先下载功能，云端需要增加订阅download_message,以方便下载完软件与配置文件后，能收到下载反馈。
 */
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include<pthread.h>
-#include <mosquitto.h>
-#include<modbus.h>
 
+#include "mosquitto.h"
+#include"modbus.h"
+#include"md5.h"//使用的libubox库
+#include "libxml/xmlmemory.h"
+#include "libxml/parser.h"
 //#include "client_shared.h" //mosq_config的定义在这里
 
 pthread_mutex_t mutex;
@@ -19,17 +23,17 @@ pthread_mutex_t mutex;
 typedef enum { ASCII, UTF_8 }ENCODE;
 typedef struct
 {
-	char		Remote_IP[15];
+	xmlChar*	Remote_IP;
 	int		    Remote_Port;
-	char		Project_name[10];
-	char		UniCode[25];
+	xmlChar*	Project_name;
+	//xmlChar*	UniCode;
 	int			Compress;
 	int			Encrypt;
 	int  		Encoding;
 	int			KeepAlive;
 	int			PushTime;
 }MqttConfig;//  针对公司要求
-#define MqttConfig_initializer {"116.62.113.69",1883,"LD","0-12345-678901-23456",0,0,1,120,1}
+#define MqttConfig_initializer {"116.62.113.69",1883,"LD",0,0,1,120,1}
 MqttConfig Mqtt = MqttConfig_initializer;
 
 //struct mosq_config {
@@ -49,7 +53,7 @@ MqttConfig Mqtt = MqttConfig_initializer;
 //	char *bind_address;
 
 //struct mosq_config cfg; // mosquitto的config  另外还有一个mosquitto_message; 相当于一共3个重要的结构体
-						  //以后再考虑加进来吧
+//以后再考虑加进来吧
 
 //MQTT相关
 int noAckTime = 5;		//无应答判别时间,单位S
@@ -60,6 +64,7 @@ int reConnectFlag = 0;//重连标志
 
 int firstGetFinishFlag = 0; //第一次采集完成标志
 int firstPubFlag = 1;//第一次推送标志
+int D_thread_flag = 1;//D消息线程开启标志。1：未开启   0：已开启
 
 char PAYLOAD_A[7]; //A消息体的结构，具体见buildMessage_A函数
 char message_C[100000];
@@ -77,23 +82,44 @@ struct mosquitto *mosq;
 char FRAMETYPE = 0;//帧类别
 char CTRL[2];	//控制字;
 
+//MQTT主题
+//publish topic
+char TOPIC_A[30];
+char TOPIC_C[30];
+char TOPIC_H[30];
+char TOPIC_ZF[30];
+char TOPIC_XA[30];
+
+//subscribe topic
+char TOPIC_B[30];
+char TOPIC_D[30];
+char TOPIC_T[30];
+char TOPIC_L[30];
+char TOPIC_ZE[30];
+char TOPIC_ZG[30];
+
 //**************************modbus配置信息****************************************************************************************
 typedef enum { None, Odd, Even }PARITY;
 typedef struct
 {
 	int			SlaveID;
-	char		Modbus_Serial_Type[10];
-	char		Com_Port[20];
+	xmlChar*	ClientID;
+	xmlChar*	Modbus_Serial_Type;
+	xmlChar*	Com_Port;
 	int			Baud_Rate;
 	int			Data_bits;
-	char		Parity;
+	xmlChar*	Parity;
 	int			Stop_bits;
-}ModbusConfig;
-#define ModbusConfig_initializer {1,"RTU","/dev/ttyUSB0",9600,8,'N',1}
+	xmlChar*	Client_IP;
+	int			Client_Port;
+}ModbusConfig;	
+#define ModbusConfig_initializer {1,"0-00000-000000-00000","TCP","/dev/ttyS0",9600,8,"N",1,"0.0.0.0",0000}
 ModbusConfig Modbus = ModbusConfig_initializer;
 
-#define CONFIGLENGTH 1500
-int Version;//版本信息
+#define CONFIGLENGTH 200
+xmlChar* ConfigEdition;//配置文件版本信息
+xmlChar* ChannelEdition;//PLC变量版本号
+unsigned char UniCode[6]="TTTTTT";//存放由ClientID转换而来的半幅序列号,赋初值为"TTTTTT"
 
 typedef enum {
 	coil = 1,
@@ -104,15 +130,15 @@ typedef enum {
 
 typedef struct
 {
-	char name[10];
-	int DataType;
-	int ModBusDataType;
-	int ModbusAddr;
-	char DeviceDateType[10];
-	int DeviceDateLen;
-	int num;
-	char desc[20];
-	int ConvertionType;
+	xmlChar*	name;
+	int			DataType;
+	int			ModBusDataType;
+	int			ModbusAddr;
+	xmlChar*	DeviceDateType;
+	int			DeviceDateLen;
+	int			num;
+	xmlChar*	desc;
+	int			ConvertionType;
 }Tab;//变量表
 Tab valueTab[CONFIGLENGTH];//配置文件中的变量总表
 int SumCount = 0;//
@@ -125,7 +151,7 @@ int count;// 变量数据体 计数
 //存储PLC中数据的变量表 modbus相关
 typedef struct
 {
-	int num;
+	short int num;
 	int length;
 	unsigned int value[2];
 	int isChange;
@@ -160,7 +186,7 @@ void buildWaitTab_D(void)
 	pthread_mutex_lock(&mutex);//cmpData是临界资源，先上个锁
 	int i, k;
 
-	if (firstPubFlag)
+	if (firstPubFlag == 1)
 	{
 		for (i = 0; i<SumCount; i++)
 		{
@@ -171,24 +197,27 @@ void buildWaitTab_D(void)
 				cmpData[i].value[k] = getData[i].value[k];
 		}
 	}
-	else 
+	else
 	{
 		for (i = 0; i<SumCount; i++)
 		{
-			cmpData[i].num = getData[i].num;//考虑删掉
-			cmpData[i].length = getData[i].length;
-			if (memcmp(&(cmpData[i].value), &(getData[i].value), sizeof(unsigned int)*(cmpData[i].length)))//与上次采集的数据不一样
+			//cmpData[i].num = getData[i].num;//考虑删掉
+			//cmpData[i].length = getData[i].length;
+			if (memcmp(&(cmpData[i].value), &(getData[i].value), sizeof(unsigned int)*(cmpData[i].length)) !=0)//与上次采集的数据不一样
 			{
-				cmpData[i].isChange += 1;// isChange是只有0和1的变化吗？是的，在builidMessageH()函数中，有将isChange重新置0
+				cmpData[i].isChange = 1;// isChange是只有0和1的变化吗？是的，在builidMessageH()函数中，有将isChange重新置0
 				//将发生变化的数据存入等待上传表
 				for (k = 0; k<cmpData[i].length; k++)
 					cmpData[i].value[k] = getData[i].value[k];
 			}
 			else
 			{
-				cmpData[i].isChange += 0;
+				cmpData[i].isChange = 0;
 			}
 		}
+		/*write for test*/
+		//cmpData[12].isChange = 1;
+		//cmpData[9].isChange = 1;
 	}
 	pthread_mutex_unlock(&mutex);//走出临界区，解锁
 }
@@ -196,38 +225,331 @@ void buildWaitTab_T(void)
 {
 	pthread_mutex_lock(&mutex);//cmpData是临界资源，先上个锁
 	int i, k;
+	for (i = 0; i<SumCount; i++)
+	{
+		cmpData[i].num = getData[i].num;
+		cmpData[i].length = getData[i].length;
+		cmpData[i].isChange = 1; //第一次全推送，相对而言全部数据发生变化
+		for (k = 0; k<cmpData[i].length; k++)
+			cmpData[i].value[k] = getData[i].value[k];
+	}
 
-	if (firstPubFlag || recevidMessage_T)
-	{
-		for (i = 0; i<SumCount; i++)
-		{
-			cmpData[i].num = getData[i].num;
-			cmpData[i].length = getData[i].length;
-			cmpData[i].isChange = 1; //第一次全推送，相对而言全部数据发生变化
-			for (k = 0; k<cmpData[i].length; k++)
-				cmpData[i].value[k] = getData[i].value[k];
-		}
-	}
-	else if (!recevidMessage_T)
-	{
-		for (i = 0; i<SumCount; i++)
-		{
-			cmpData[i].num = getData[i].num;
-			cmpData[i].length = getData[i].length;
-			if (memcmp(&(cmpData[i].value), &(getData[i].value), sizeof(unsigned int)*(cmpData[i].length)))//与上次采集的数据不一样
-			{
-				cmpData[i].isChange += 1;// isChange是只有0和1的变化吗？是的，在builidMessageH()函数中，有将isChange重新置0
-				//将发生变化的数据存入等待上传表
-				for (k = 0; k<cmpData[i].length; k++)
-					cmpData[i].value[k] = getData[i].value[k];
-			}
-			else
-			{
-				cmpData[i].isChange += 0;
-			}
-		}
-	}
+	//if (firstPubFlag || recevidMessage_T)
+	//{
+	//	for (i = 0; i<SumCount; i++)
+	//	{
+	//		cmpData[i].num = getData[i].num;
+	//		cmpData[i].length = getData[i].length;
+	//		cmpData[i].isChange = 1; //第一次全推送，相对而言全部数据发生变化
+	//		for (k = 0; k<cmpData[i].length; k++)
+	//			cmpData[i].value[k] = getData[i].value[k];
+	//	}
+	//}
+	//else if (!recevidMessage_T)
+	//{
+	//	for (i = 0; i<SumCount; i++)
+	//	{
+	//		cmpData[i].num = getData[i].num;
+	//		cmpData[i].length = getData[i].length;
+	//		if (memcmp(&(cmpData[i].value), &(getData[i].value), sizeof(unsigned int)*(cmpData[i].length)))//与上次采集的数据不一样
+	//		{
+	//			cmpData[i].isChange += 1;// isChange是只有0和1的变化吗？是的，在builidMessageH()函数中，有将isChange重新置0
+	//			//将发生变化的数据存入等待上传表
+	//			for (k = 0; k<cmpData[i].length; k++)
+	//				cmpData[i].value[k] = getData[i].value[k];
+	//		}
+	//		else
+	//		{
+	//			cmpData[i].isChange += 0;
+	//		}
+	//	}
+	//}
 	pthread_mutex_unlock(&mutex);//走出临界区，解锁
+}
+//ClientID转半幅序列号UniCode
+static unsigned char digits[64] = {
+
+	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+	'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
+	'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
+	'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B', 'C', 'D',
+	'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N',
+	'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+	'Y', 'Z', '_', '@'
+};
+void ParseToGuo64(unsigned char* serialNumber, unsigned char* UniCode)
+{
+	char uu[] = "00000000000";
+	unsigned char* unicode;
+	unsigned char cost = ' ';
+	long long clientNum = 0;
+	int i = 0;
+	int j = 0;
+	while (i < 2)
+	{
+		cost = serialNumber[j];
+		j++;
+		if (cost == '-')
+		{
+			i++;
+		}
+	}
+	i = 0;
+	while (cost != '\0')
+	{
+		cost = serialNumber[j];
+		if (cost != '-')
+		{
+			uu[i] = (char)cost;
+			i++;
+		}
+		j++;
+	}
+	i = 0;
+	clientNum = atoll(uu);
+	for (i = 1; i <= 6; i++)
+	{
+		int remainder = (int)(clientNum % 64);
+		UniCode[6 - i] = digits[remainder];
+		clientNum = clientNum / 64;
+	}
+
+}
+
+//***********************************读取xml配置文件*******************************************************************************
+void ReadXmlNodeElement_mqtt_server(xmlNodePtr cur)
+{
+	xmlNodePtr curNodePtr = cur;  //创建一个临时变量用来存储cur
+	xmlChar* temp;
+	while (xmlStrcmp(cur->name, BAD_CAST"datacenter"))
+	{
+		cur = cur->next;
+	}
+	if (!xmlStrcmp(cur->name, BAD_CAST"datacenter"))
+	{
+		curNodePtr = cur;
+		xmlAttrPtr curAttrPtr = curNodePtr->properties;
+		while (curAttrPtr != NULL)
+		{
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Version"))			//找到对应元素的名称
+			{
+
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Version");
+				ConfigEdition = temp;
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Remote_IP"))			//找到对应元素的名称
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Remote_IP");
+				Mqtt.Remote_IP = temp;
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Remote_Port"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Remote_Port");
+				Mqtt.Remote_Port = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"project_name"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"project_name");
+				Mqtt.Project_name = temp;
+			}
+			/*if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"UniCode"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"UniCode");
+				Mqtt.UniCode = temp;
+			}*/
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Compress"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Compress");
+				Mqtt.Compress = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Encrypt"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Encrypt");
+				Mqtt.Encrypt = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Encoding"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Encoding");
+				Mqtt.Encoding = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"keepalive"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"keepalive");
+				Mqtt.KeepAlive = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"pushTime"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"pushTime");
+				Mqtt.PushTime = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			curAttrPtr = curAttrPtr->next;
+		}
+
+	}
+}
+void ReadXmlNodeElement_modbus_client(xmlNodePtr cur)
+{
+	xmlNodePtr curNodePtr = cur;  //创建一个临时变量用来存储cur
+	xmlChar* temp;
+	printf("this is modbus1\n");
+	while (xmlStrcmp(cur->name, BAD_CAST"station"))
+	{
+		cur = cur->next;
+	}
+	if (!xmlStrcmp(cur->name, BAD_CAST"station"))
+	{
+		printf("this is modbus2\n");
+		curNodePtr = cur;
+		xmlAttrPtr curAttrPtr = curNodePtr->properties;
+		while (curAttrPtr != NULL)
+		{
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"SlaveID"))			//找到对应元素的名称
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"SlaveID");
+				Modbus.SlaveID = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ClientID"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"ClientID");
+				Modbus.ClientID = temp;
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Modbus_Serial_Type"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Modbus_Serial_Type");
+				Modbus.Modbus_Serial_Type = temp;
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Com_Port"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Com_Port");
+				Modbus.Com_Port = temp;
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Baud_Rate"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Baud_Rate");
+				Modbus.Baud_Rate = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Data_bits"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Data_bits");
+				Modbus.Data_bits = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Parity"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Parity");
+				Modbus.Parity = temp;
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Stop_bits"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Stop_bits");
+				Modbus.Stop_bits = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Client_IP"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Client_IP");
+				Modbus.Client_IP = temp;   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Client_Port"))
+			{
+				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Client_Port");
+				Modbus.Client_Port = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
+			}
+			curAttrPtr = curAttrPtr->next;
+		}
+	}
+}
+void ReadXmlNodeElement_Channel(xmlNodePtr cur)				//将xml文件列表中Channel的相应元素读取到valueTab中
+{
+	xmlNodePtr curNodePtr = cur;  //创建一个临时变量用来存储cur
+	int i = 0;					  //计数变量
+	xmlChar* temp;
+	while (NULL != cur)
+	{
+		{
+			if (!xmlStrcmp(cur->name, BAD_CAST"channel"))
+			{
+				curNodePtr = cur;
+				xmlAttrPtr curAttrPtr = curNodePtr->properties;
+				while (curAttrPtr != NULL)
+				{
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"name"))			//找到对应元素的名称
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"name"); //(i + 1) / 2 - 5 这个表达式是为了将   循环的i转换为从0开始的数  需要优化
+						valueTab[i].name = temp;
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Datetype"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"Datetype");
+						valueTab[i].DataType = atoi((char*)temp);
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"modbusType"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"modbusType");
+						valueTab[i].ModBusDataType = atoi((char*)temp);
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"modbusAddress"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"modbusAddress");
+						valueTab[i].ModbusAddr = atoi((char*)temp);
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"deviceDataType"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"deviceDataType");
+						valueTab[i].DeviceDateType = temp;
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"deviceDataLen"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"deviceDataLen");
+						valueTab[i].DeviceDateLen = atoi((char*)temp);
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"num"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"num");
+						//printf("%s || %d\n", xmlGetProp(curNodePtr, (const xmlChar*)"name"), i);
+						valueTab[i].num = atoi((char*)temp);
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"desc"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"desc");
+						valueTab[i].desc = temp;
+					}
+					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ConvertionType"))
+					{
+						temp = xmlGetProp(curNodePtr, (const xmlChar*)"ConvertionType");
+						valueTab[i].ConvertionType = atoi((char*)temp);
+					}
+					curAttrPtr = curAttrPtr->next;
+				}
+				i++;
+			}
+		}
+		cur = cur->next;
+	}
+	SumCount = i;//此处给sumCount赋初值，初值的值为channel的个数
+}
+void print_xmlconfig(void)
+{
+	int i = 0;
+	while (i < 100)
+	{
+		if (valueTab[i].name != NULL)
+			printf("Name:%5s DT:%5d MBDT:%5d MBA:%5d DDT:%5s DDL:%5d N:%5d desc:%5s CT:%5d\n\n",
+			valueTab[i].name, valueTab[i].DataType, valueTab[i].ModBusDataType, valueTab[i].ModbusAddr, valueTab[i].DeviceDateType, valueTab[i].DeviceDateLen, valueTab[i].num, valueTab[i].desc, valueTab[i].ConvertionType);
+		i++;
+
+	}
+	printf("Remote_IP:%s Remote_Port:%d Project_name:%s Compress:%d Encrypt:%d Encoding:%d KeepAlive:%d PushTime:%d\n\n",
+		Mqtt.Remote_IP, Mqtt.Remote_Port, Mqtt.Project_name, Mqtt.Compress, Mqtt.Encrypt, Mqtt.Encoding, Mqtt.KeepAlive, Mqtt.PushTime);
+	printf("SlaveID:%d ClientID:%s Modbus_Serial_Type:%s Com_Port:%s Baud_Rate:%d Data_bits:%d Parity:%s Stop_bits:%d\n\n",
+		Modbus.SlaveID, Modbus.ClientID, Modbus.Modbus_Serial_Type, Modbus.Com_Port, Modbus.Baud_Rate, Modbus.Data_bits, Modbus.Parity, Modbus.Stop_bits);
+	printf("ConfigEdition:%s\n", ConfigEdition);
+}
+void ReadXmlNodeElement(xmlNodePtr cur)		//这个函数是读取xml文件内容的函数，为了方便阅读，分成三个小的函数
+{
+
+	cur = cur->xmlChildrenNode;
+	ReadXmlNodeElement_mqtt_server(cur);
+	ReadXmlNodeElement_modbus_client(cur);
+	ReadXmlNodeElement_Channel(cur);
 }
 int sortConfig(void)
 {
@@ -296,59 +618,67 @@ int sortConfig(void)
 	printf("===============================================\n");
 	return 0;
 }
-
-#define MAX_LINE_LEN 1000
-int readConfig(void)
+int readConfig(int argc,char* argv[])
 {
-	char line[MAX_LINE_LEN] = { 0 };   //临时存放配置信息的
-	FILE *fp = fopen("config.txt", "r");
-	int tempCount = 0;
-	if (fp == NULL)
-	{
-		printf("Fail to open file config.txt, %s.\n", strerror(errno));
-		return 0;
-	}
-	printf("读取配置文件\n\n");
-	while (fgets(line, MAX_LINE_LEN + 1, fp) != NULL)
-	{
-		if (tempCount == 1)
-		{
-			fscanf(fp, "%d%s%s%d%d%s%d", &Modbus.SlaveID, &Modbus.Modbus_Serial_Type, &Modbus.Com_Port, &Modbus.Baud_Rate, &Modbus.Data_bits, &Modbus.Parity, &Modbus.Stop_bits);
-			printf("\n%d	%s	%s	%d	%d	%c	%d\n", Modbus.SlaveID, Modbus.Modbus_Serial_Type, Modbus.Com_Port, Modbus.Baud_Rate, Modbus.Data_bits, Modbus.Parity, Modbus.Stop_bits);
-		}
-		else if (tempCount == 5)
-		{
-			fscanf(fp, "%s%d%s%s%d%d%d%d%d", &Mqtt.Remote_IP, &Mqtt.Remote_Port, &Mqtt.Project_name, &Mqtt.UniCode, &Mqtt.Compress, &Mqtt.Encrypt, &Mqtt.Encoding, &Mqtt.KeepAlive, &Mqtt.PushTime);
-			printf("\n%s	%d	%s	%s	%d	%d	%d	%d	%d\n", Mqtt.Remote_IP, Mqtt.Remote_Port, Mqtt.Project_name, Mqtt.UniCode, Mqtt.Compress, Mqtt.Encrypt, Mqtt.Encoding, Mqtt.KeepAlive, Mqtt.PushTime);
-		}
-		else if (tempCount == 9)
-		{
-			fscanf(fp, "%d", &Version);
-			printf("\n===version=%d\n\n", Version);
-		}
-		else if (tempCount == 13)
-		{
-			int count = 0;
-			while (-1 != fscanf(fp, "%s%d%d%d%s%d%d%s%d", &valueTab[count].name, &valueTab[count].DataType, &valueTab[count].ModBusDataType, &valueTab[count].ModbusAddr, &valueTab[count].DeviceDateType, &valueTab[count].DeviceDateLen, &valueTab[count].num, &valueTab[count].desc, &valueTab[count].ConvertionType))
-			{
-				printf("%8s	%d	%d	%d	%s	%d	%d	%s	%d\n", valueTab[count].name, valueTab[count].DataType, valueTab[count].ModBusDataType, valueTab[count].ModbusAddr, valueTab[count].DeviceDateType, valueTab[count].DeviceDateLen, valueTab[count].num, valueTab[count].desc, valueTab[count].ConvertionType);
-				count++;
-			}
-			SumCount = count;
-			printf("\n****SumCount %d\n\n", SumCount);
-		}
-		tempCount++;
+	xmlDocPtr doc;
+	xmlNodePtr cur;
 
+	char* szDocName;
+	if (argc <= 1)
+	{
+		printf("Usage: %s docname\n", argv[0]);
+		return(0);
+	}
+	szDocName = argv[1];
+	doc = xmlReadFile(szDocName, "UTF-8", XML_PARSE_RECOVER);
+	if (NULL == doc)
+	{
+		fprintf(stderr, "Document not patibleparsed successfully.");
+		return -1;
 	}
 
-	if (fclose(fp) != 0)
-		printf("close file Failed!");
+	cur = xmlDocGetRootElement(doc);
+	//printStructure(cur);
+	if (NULL == cur)
+	{
+		fprintf(stderr, "empty document\n");
+		xmlFreeDoc(doc);
+		return -1;
+	}
+
+	if (xmlStrcmp(cur->name, BAD_CAST"conf"))
+	{
+		fprintf(stderr, "document of the wrong type, root node != conf");
+		xmlFreeDoc(doc);
+		return -1;
+	}
+
+	ReadXmlNodeElement(cur);
+	print_xmlconfig();
+	xmlFreeDoc(doc);
 
 	sortConfig();//排序
 	buildCtrl();//生成控制字
 	return 1;
 }
+void TopicNaming()
+{	//publish topic
+	sprintf(TOPIC_A, "%s/%s/P/A", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_C, "%s/%s/P/C", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_H, "%s/%s/P/H", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_ZF, "%s/%s/P/ZF", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_XA, "%s/%s/P/XA", Mqtt.Project_name, UniCode);
 
+	//subscribe topic
+	sprintf(TOPIC_B, "%s/%s/P/B", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_D, "%s/%s/P/D", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_T, "%s/%s/P/T", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_L, "%s/%s/P/L", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_ZE, "%s/%s/P/ZE", Mqtt.Project_name, UniCode);
+	sprintf(TOPIC_ZG, "%s/%s/P/ZG", Mqtt.Project_name, UniCode);
+
+	printf("打印出TOPIC_以便测试：%s\n", TOPIC_C);
+}
 //时间等待 (ms)
 int MySleep(long milliseconds)
 {
@@ -373,16 +703,22 @@ int getModbusData(void *arg)
 	uint16_t *tab_rp_registers;//字
 	uint8_t *tab_rp_bits;//位
 
-	if (Modbus.Modbus_Serial_Type[0] == 'R')//RTU
+	if (!strcmp(Modbus.Modbus_Serial_Type,"RTU"))//RTU
 	{
 		printf("getMogbusData>>> RTU\n");
-		ctx = modbus_new_rtu(Modbus.Com_Port, Modbus.Baud_Rate, Modbus.Parity, Modbus.Data_bits, Modbus.Stop_bits);//N E O
+		ctx = modbus_new_rtu((char*)Modbus.Com_Port, Modbus.Baud_Rate, (char)*Modbus.Parity, Modbus.Data_bits, Modbus.Stop_bits);//N E O
+	}
+	else if(!strcmp(Modbus.Modbus_Serial_Type, "TCP"))
+	{
+		printf("getMogbusData>>> TCP\n");
+		ctx = modbus_new_tcp((char*)Modbus.Client_IP, Modbus.Client_Port);
 	}
 	else
 	{
 		printf("getMogbusData>>> ASCII is not achieved\n");  //待修改，库文件中是有ascii的，不知道为什么编译时有undeclare
 		//ctx = modbus_new_ascii(Modbus.Com_Port, Modbus.Baud_Rate, Modbus.Parity, Modbus.Data_bits, Modbus.Stop_bits);//N E O
 	}
+
 	if (ctx == NULL)
 	{
 		printf("Unable to allocate libmodbus context\n");
@@ -403,7 +739,7 @@ int getModbusData(void *arg)
 		int M, N;//采集变量个数 / 125 的商和余数
 		int m;
 		int k = 0, l = 0;//采集变量表的个数增加
-		MySleep(5000);//采集周期
+		MySleep(1000);//采集周期
 
 		if (SumCount_hold>0)//
 		{	//printf(">>>读保持寄存器\n");
@@ -413,7 +749,7 @@ int getModbusData(void *arg)
 			N = NB % 120;
 			for (m = 0; m<M; m++)
 			{
-	
+
 				tab_rp_registers = (uint16_t *)malloc(120 * sizeof(uint16_t));
 				memset(tab_rp_registers, 0, 120 * sizeof(uint16_t));
 				//printf("%d modbus_read_registers %d %d \n",m+1,ADDRESS+m*125,125);
@@ -453,7 +789,10 @@ int getModbusData(void *arg)
 					//printf("*********%d\n",m);
 				}
 				else
+				{
 					printf("hold %d 120 failed!\n", m);
+				}
+				free(tab_rp_registers);
 			}
 			if (N != 0)
 			{
@@ -485,11 +824,14 @@ int getModbusData(void *arg)
 					//printf("\n");
 				}
 				else
+				{
 					printf("hold  NB-120 failed!\n");
+				}
+				free(tab_rp_registers);
 			}
 
 		}
-		MySleep(1000);
+		//MySleep(1000);
 		if (SumCount_input>0)
 		{
 			//printf(">>>读输入状态\n");
@@ -529,7 +871,10 @@ int getModbusData(void *arg)
 					printf("\n");*/
 				}
 				else
+				{
 					printf("input failed!\n");
+				}
+				free(tab_rp_bits);
 			}
 			if (N != 0)
 			{
@@ -561,21 +906,24 @@ int getModbusData(void *arg)
 					printf("\n");*/
 				}
 				else
+				{
 					printf("input failed!\n");
+				}
+				free(tab_rp_bits);
 			}
 		}
 		//break;//test
 		//printf("\n#############################################################\n");
 		//TODO
 		firstGetFinishFlag = 1;//第一次采采集完成
-		buildWaitTab_T();
+		//buildWaitTab_T();
 	}
 	return 1;
 }
 
 
 // ******************************** 构建 消息内容 和 发送消息 函数****************************************************************
-void buildMessage_A(char frameType, char ctrl[2], int data)
+void buildMessage_A(char frameType, char ctrl[2], int data) //版本信息由原先的int更改为char之后，这个函数该怎么修改呢？
 {
 	int i;
 
@@ -601,13 +949,13 @@ void sendMessage_A(void)
 {
 	FRAMETYPE = 0x01;//帧类别
 	buildCtrl();//生成控制字
-	buildMessage_A(FRAMETYPE, CTRL, Version);
+	buildMessage_A(FRAMETYPE, CTRL, 23);//先暂时给个具体数，待修改
 	struct mosquitto_message pubmsgA;
 	pubmsgA.payload = PAYLOAD_A;
 	pubmsgA.payloadlen = sizeof(PAYLOAD_A);
 	pubmsgA.qos = 1;
 	pubmsgA.retain = 0;//服务器端必须存储这个应用消息和它的服务质量等级（qos），以便它可以被分发给未来的主题名匹配的订阅者
-	
+
 	int i;
 	printf("This is messageA:\n");
 	for (i = 0; i < 7; i++)
@@ -615,7 +963,7 @@ void sendMessage_A(void)
 		printf("%x\n", PAYLOAD_A[i]);
 	}
 
-	mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/A", pubmsgA.payloadlen, pubmsgA.payload, pubmsgA.qos, pubmsgA.retain);
+	mosquitto_publish(mosq, &sent_mid, TOPIC_A, pubmsgA.payloadlen, pubmsgA.payload, pubmsgA.qos, pubmsgA.retain);
 
 }
 
@@ -627,7 +975,7 @@ char* buildJson(void)
 	//char tempC[1000];//消息C 临时存放量 用来生成Json		<<<< buildJson
 	char* tempC;
 	tempC = (char*)malloc(sizeof(char)*(100 * SumCount + 29));//29为Json上下行的字节数，100为每行的字节数
-	offsetC += sprintf(tempC, "{\"ver\":%d,\"taglst\":[", Version);
+	offsetC += sprintf(tempC, "{\"ver\":%s,\"taglst\":[", ConfigEdition);//之前是Version，因为Version修改为char型的ConfigEdition了，不确定这样写对不对
 	for (i = 0; i<SumCount; i++)
 		offsetC += sprintf(tempC + offsetC, "{\"nam\":\"%s\",\"dsc\":\"%s\",\"addr\":%d,\"vt\":%d},", valueTab[i].name, valueTab[i].desc, valueTab[i].num, valueTab[i].DataType);
 	offsetC += sprintf(tempC + offsetC - 1, "]}");
@@ -649,10 +997,10 @@ char* buildMessage_C(char frameType, char ctrl[2], int* length)
 	printf("*****ctrl 1*****%d\n",message_C[1]);
 	printf("*****ctrl 0*****%d\n",message_C[2]);
 	printf("****strlen(pointTab)= %d\n",strlen(pointTab));*/
-	*length = strlen(pointTab) + 3;//为什么要加一个3？
+	*length = strlen(pointTab) + 3;//为什么要加一个3？因为前三位是frametype和ctrl
 	for (i = 0; i<strlen(pointTab); i++)
 		message_C[3 + i] = pointTab[i];
-
+	free(pointTab);// 这句很容易漏掉，因为在buildJson函数中，malloc了*tempC，且作为返回值，因此需要在此处释放
 	return message_C;
 }
 char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn)
@@ -703,12 +1051,14 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 	for (i = 0; i<SumCount; i++)
 	{
 		pthread_mutex_lock(&mutex);//进入临界资源区，cmpData是临界资源，上锁****这个锁加在for循环外面会不会更好？？？
-		if (cmpData[i].isChange != 0)
+		if (cmpData[i].isChange == 1)
 		{
 			cmpData[i].isChange = 0;//清除 改变标志
 			//变量数据体
-			message_H[j++] = cmpData[i].num / 0xff;//变量序号高8位，相当于向右平移8位，不过这里num是个4字节的int，这样不对吧。公司的需求是UINT16的，是不是要改成short int。但是又考虑到num如果不大于256的话，也不会出问题，那就先这样。
-			message_H[j++] = cmpData[i].num % 0xff;//变量序号低8位
+			message_H[j++] = cmpData[i].num >> 8;
+			message_H[j++] = cmpData[i].num & 0x00ff;
+			//message_H[j++] = cmpData[i].num / 0xff;//变量序号高8位，相当于向右平移8位，不过这里num是个4字节的int，这样不对吧。公司的需求是UINT16的，是不是要改成short int。但是又考虑到num如果不大于256的话，也不会出问题，那就先这样。
+			//message_H[j++] = cmpData[i].num % 0xff;//变量序号低8位
 
 			switch (valueTab[cmpData[i].num - 1].DataType)
 			{
@@ -774,16 +1124,16 @@ char* buildMessage_H(char frameType, char ctrl[2], int* length, int *countReturn
 int sendMessage_C(void)
 {
 	struct mosquitto_message pubmsgC = { 0, NULL, NULL, 0, 0, 0 };
-	char* TOPIC_C = NULL;
-	TOPIC_C = (char*)malloc(sizeof(char)* 30);	//变量表发送
-	if (TOPIC_C == NULL)
-	{
-		perror("malloc");
-		return -1;
-	}
+	//char* TOPIC_C = NULL;
+	//TOPIC_C = (char*)malloc(sizeof(char)* 30);	//变量表发送
+	//if (TOPIC_C == NULL)
+	//{
+	//	perror("malloc");
+	//	return -1;
+	//}
 	char* PAYLOAD_C;
 	int length;
-	sprintf(TOPIC_C, "%s/%s/P/C", Mqtt.Project_name, Mqtt.UniCode);
+	//sprintf(TOPIC_C, "%s/%s/P/C", Mqtt.Project_name, UniCode);
 
 	FRAMETYPE = 0x02;
 	PAYLOAD_C = buildMessage_C(FRAMETYPE, CTRL, &length);
@@ -805,7 +1155,7 @@ int sendMessage_C(void)
 	}
 
 	mosquitto_publish(mosq, NULL, TOPIC_C, pubmsgC.payloadlen, pubmsgC.payload, pubmsgC.qos, pubmsgC.retain);
-	free(TOPIC_C);
+	//free(TOPIC_C);
 	return 1;
 	//等待一分钟  先改为1s
 	//MySleep(1000*60)		
@@ -815,25 +1165,25 @@ int sendMessage_C(void)
 int sendMessage_H(void)
 {
 	struct mosquitto_message pubmsgH = { 0, NULL, NULL, 0, 0, 0 };
-	char*TOPIC_H = NULL;
-	TOPIC_H = (char*)malloc(sizeof(char)* 30);	//实时变量值上传
-	if (TOPIC_H == NULL)
-	{
-		perror("malloc");
-		return -1;
-	}
+	//char*TOPIC_H = NULL;
+	//TOPIC_H = (char*)malloc(sizeof(char)* 30);	//实时变量值上传
+	//if (TOPIC_H == NULL)
+	//{
+	//	perror("malloc");
+	//	return -1;
+	//}
 	char* PAYLOAD_H;
 	int length;
-	int testA; 
+	int testA;
 	int countReturn = 0;
 
 	firstPubFlag = 0;//	取消第一次推送标志
-	sprintf(TOPIC_H, "%s/%s/P/H", Mqtt.Project_name, Mqtt.UniCode);
+	//sprintf(TOPIC_H, "%s/%s/P/H", Mqtt.Project_name,UniCode);
 
 	FRAMETYPE = 0x0A;
-	PAYLOAD_H = buildMessage_H(FRAMETYPE, CTRL, &length, &countReturn);//这是引用的用法吗？
-	printf("count = %d \n",countReturn);
-	
+	PAYLOAD_H = buildMessage_H(FRAMETYPE, CTRL, &length, &countReturn);//这是引用的用法吗？不是，是指针的用法，还是太嫩了。
+	printf("count = %d \n", countReturn);
+
 
 	if (count != 0) // 变量数据体 计数
 	{
@@ -860,7 +1210,7 @@ int sendMessage_H(void)
 	{
 		//	printf("no message need to publish... \n");
 	}
-	free(TOPIC_H);
+	//free(TOPIC_H);
 	return 1;
 	//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/H", strlen("H"), "H", 0, false); 测试用代码
 }
@@ -872,31 +1222,126 @@ void response_D(void)
 		sendMessage_H();
 		MySleep(5000);
 	}
+	D_thread_flag = 1; //标志位恢复到初始状态
 	recevidMessage_D = 0;
 }
-int recMessage_download(struct mosquitto *mosq, const struct mosquitto_message *msg)
-{//尝试下载一个名为test的二进制文件
+
+//发送网关资源数据md5校验码
+int sendMessage_ZF(unsigned char* buf)
+{
+	struct mosquitto_message pubmsgZF = { 0, NULL, NULL, 0, 0, 0 };
+	/*char* TOPIC_ZF = NULL;
+	TOPIC_ZF = (char*)malloc(sizeof(char)* 30);	
+	if (TOPIC_ZF == NULL)
+	{
+		perror("malloc");
+		return -1;
+	}*/
+	char* PAYLOAD_ZF;
+	int length;
+	//sprintf(TOPIC_ZF, "%s/%s/P/ZF", Mqtt.Project_name, UniCode);
+
+	pubmsgZF.payload = buf;
+	pubmsgZF.payloadlen = 33;
+	pubmsgZF.qos = 1;
+	pubmsgZF.retain = 0;
+
+	printf("This is meaasgeZF:\n");
+	int i;
+	for (i = 0; i < 33; i++)
+	{
+		printf("%c", buf[i]);
+	}
+	mosquitto_publish(mosq, NULL, TOPIC_ZF, pubmsgZF.payloadlen, pubmsgZF.payload, pubmsgZF.qos, pubmsgZF.retain);
+	//free(TOPIC_ZF);
+	return 1;
+	//等待一分钟  先改为1s
+	//MySleep(1000*60)		
+	//	MySleep(1000);
+	//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/C", strlen("C"), "C", 0, false); 测试用代码
+}
+void buildMessage_XA(char frameType, char ctrl[2], char* payload_xa,int* length)
+{
+	payload_xa[0] = frameType;
+	payload_xa[1] = ctrl[1];
+	payload_xa[2] = ctrl[0] + 1;//只有消息为JSon时  需要 +1
+
+	char* temp;
+	temp = (char*)malloc(sizeof(char)* 100);
+	sprintf(temp, "{\"device\":[{\"nam\":\"%s\",\"snnum\":\"%s\",\"ver\":\"%s\"}]}", "网关名称", Modbus.ClientID, ConfigEdition);
+
+	//把temp的内容赋给payload_xa，应该还会有更优雅的办法吧。
+	int i;
+	*length = strlen(temp) + 3;//为什么要加一个3？因为前三位是frametype和ctrl
+	for (i = 0; i<strlen(temp); i++)
+		payload_xa[3 + i] = temp[i];
+	free(temp);
+}
+void sendMessage_XA()
+{
+	int LENGTH;
+	char* PAYLOAD_XA;
+	buildMessage_XA(FRAMETYPE, CTRL, PAYLOAD_XA,&LENGTH);
+	struct mosquitto_message pubmsgXA = { 0, NULL, NULL, 0, 0, 0 };
+	/*char* TOPIC_XA = NULL;
+	TOPIC_XA = (char*)malloc(sizeof(char)* 30);	
+	if (TOPIC_XA == NULL)
+	{
+		perror("malloc");
+	}*/
+	//sprintf(TOPIC_XA, "%s/%s/P/C", Mqtt.Project_name, UniCode);
+
+	FRAMETYPE = 0x00;	//第一个字节为保留字节
+	buildMessage_XA(FRAMETYPE, CTRL, PAYLOAD_XA,&LENGTH);
+	pubmsgXA.payload = PAYLOAD_XA;
+	pubmsgXA.payloadlen = LENGTH;
+	pubmsgXA.qos = 1;
+	pubmsgXA.retain = 0;
+	mosquitto_publish(mosq, NULL, TOPIC_XA, pubmsgXA.payloadlen, pubmsgXA.payload, pubmsgXA.qos, pubmsgXA.retain);
+	//free(TOPIC_XA);
+}
+int recMessage_download_config(struct mosquitto *mosq, const struct mosquitto_message *msg)//需要增加报文标识符、控制字的识别
+{//下载一个名为config的配置文件
 	char* DownloadMsg;
+	int  p_deviation;
 	DownloadMsg = msg->payload;
+	p_deviation = atoi(DownloadMsg[3]) +4 ;
 	int j;
-	for (j = 0 ; j < msg->payloadlen; j++)
+	for (j = 0; j < msg->payloadlen; j++)
 	{
 		printf("%c", DownloadMsg[j]);
 	}
 	int i;//接收返回值
 	FILE *fp;
-	if ((fp = fopen("test", "w+b")) == NULL)//w+打开可读写文件，b：二进制
+	if ((fp = fopen("/tmp/config.xml", "w+b")) == NULL)//w+打开可读写文件，b：二进制
 	{
 		printf("Can't open file!");
-			exit(1);
+		exit(1);
 	}
-	i = fwrite(msg->payload,sizeof(char),msg->payloadlen, fp);
+	i = fwrite(DownloadMsg + p_deviation, sizeof(char), msg->payloadlen - p_deviation, fp);
 	printf("input nmemb is %d\n", i);
 	fclose(fp);
+
+	//md5校验
+	unsigned char* buf;	//用于存放md5校验码
+	buf = (char*)malloc(33 * sizeof(char));
+	md5sum("/tmp/config.xml", buf);		//
+	/*for (i = 0; i < 16; i++)
+	{
+		printf("%c", buf[i]);
+	}*/
+	sendMessage_ZF(buf);
+	free(buf);
+	
 	return 0;
 
 }
-
+int recMessage_reboot(void)
+{
+	int ret;
+	ret=system("reboot");
+	return ret;
+}
 
 //*****************************回调函数们**************************************************
 void on_connect(struct mosquitto *mosq, void *obj, int rc)
@@ -906,12 +1351,14 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
 		exit(1);
 	}
 	else{
-		mosquitto_subscribe(mosq, NULL,"LD/TTTTTT/S/B",0);
-		mosquitto_subscribe(mosq, NULL, "LD/TTTTTT/S/D", 0);
-		mosquitto_subscribe(mosq, NULL, "LD/TTTTTT/S/T", 0);
-		mosquitto_subscribe(mosq, NULL, "LD/TTTTTT/S/L", 0);
-		mosquitto_subscribe(mosq, NULL, "download", 0);
+		mosquitto_subscribe(mosq, NULL, TOPIC_B, 0);//TTTTTT改起来是个麻烦事，应该要把TOPIC_* 改成全局变量了
+		mosquitto_subscribe(mosq, NULL, TOPIC_D, 0);
+		mosquitto_subscribe(mosq, NULL, TOPIC_T, 0);
+		mosquitto_subscribe(mosq, NULL, TOPIC_L, 0);
+		mosquitto_subscribe(mosq, NULL, TOPIC_ZE, 0);
+		mosquitto_subscribe(mosq, NULL, TOPIC_ZG, 0);//重启直接关机重启
 		sendMessage_A();
+		sendMessage_XA();
 		//mosquitto_publish(mosq, &sent_mid, "LD/TTTTTT/P/A", strlen("message"), "message", 0, false); 测试用代码
 	}
 }
@@ -922,25 +1369,29 @@ void on_publish(struct mosquitto *mosq, void *obj, int mid)
 
 void my_message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
 {
-	if (strcmp(msg->topic,"LD/TTTTTT/S/B")==0)
+	if (strcmp(msg->topic, TOPIC_B) == 0)
 	{
 		recevidMessage_B = 1;
 	}
-	else if (strcmp(msg->topic, "LD/TTTTTT/S/D") == 0)
+	else if (strcmp(msg->topic, TOPIC_D) == 0)
 	{
 		recevidMessage_D = 1;
 	}
-	else if (strcmp(msg->topic, "LD/TTTTTT/S/T") == 0)
+	else if (strcmp(msg->topic, TOPIC_T) == 0)
 	{
 		recevidMessage_T = 1;
 	}
-	else if (strcmp(msg->topic, "LD/TTTTTT/S/L") == 0)
+	else if (strcmp(msg->topic, TOPIC_L) == 0)
 	{
 		recevidMessage_L = 1;
 	}
-	else if (strcmp(msg->topic,"download") == 0)
+	else if (strcmp(msg->topic, TOPIC_ZE) == 0)
 	{
-		recMessage_download(mosq, msg);
+		recMessage_download_config(mosq, msg);
+	}
+	else if (strcmp(msg->topic, TOPIC_ZG) == 0)
+	{
+		recMessage_reboot();
 	}
 	else
 	{
@@ -948,7 +1399,7 @@ void my_message_callback(struct mosquitto *mosq, void *obj, const struct mosquit
 	}
 	//mosquitto_disconnect(mosq); 
 	//printf("%s\n",msg->topic);测试时加进来的
-	
+
 }
 
 void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
@@ -959,24 +1410,26 @@ void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
 int main(int argc, char *argv[])
 {
 
-	pthread_t id1,id2;
-	readConfig();
+	pthread_t id1, id2;
+	readConfig(argc,argv);
+	ParseToGuo64(Modbus.ClientID, UniCode);//将设备的ClientID转化为UniCode，以便于构建消息topic
+	printf("UniCode:%6s\n", UniCode);//测试用
+	TopicNaming();
+
 	pthread_create(&id1, NULL, (void *)getModbusData, NULL);
 	int rc;
 	//struct mosq_config cfg;
 	//cfg.username = "admin";
 	//cfg.password = "password";//该用在哪里呢？
-
 	mosquitto_lib_init();
-
 	mosq = mosquitto_new("gateway", true, NULL);
 
 	/*
-	 *Problem:waiting to improve
-	 *Explaination:如果使用下面两个函数，我理解就是使用了openssl安全协议，在连接时会服务器
-	 *				端会报错，“Socket error on client<unknown>,discounting”,应该是client需要
-	 *				安全注册。注释掉这两个函数就能够连接成功了，安全方面的事情现在暂时先不管。
-	 */
+	*Problem:waiting to improve
+	*Explaination:如果使用下面两个函数，我理解就是使用了openssl安全协议，在连接时会服务器
+	*				端会报错，“Socket error on client<unknown>,discounting”,应该是client需要
+	*				安全注册。注释掉这两个函数就能够连接成功了，安全方面的事情现在暂时先不管。
+	*/
 	//mosquitto_tls_opts_set(mosq, 1, "tlsv1", NULL);  //Set advanced SSL / TLS options.Must be called before <mosquitto_connect>.
 	//rc = mosquitto_tls_psk_set(mosq, "deadbeef", "psk-id", NULL);
 	//if (rc){
@@ -984,8 +1437,8 @@ int main(int argc, char *argv[])
 	//	return rc;
 	//}
 	mosquitto_connect_callback_set(mosq, on_connect); //过程是这样：（1）我们调用mosquitto_connect函数，向broker请求连接
-																  //（2）broker返回一个CONNACK信息
-																  //（3）收到CONNACK信息后，调用该回调函数，回调函数又会调用on_connect函数。
+	//（2）broker返回一个CONNACK信息
+	//（3）收到CONNACK信息后，调用该回调函数，回调函数又会调用on_connect函数。
 	mosquitto_disconnect_callback_set(mosq, on_disconnect);//当broker收到DISCONNECT命令并且断开client的时候调用
 	mosquitto_publish_callback_set(mosq, on_publish);   // publish完就调用这个函数
 
@@ -1013,9 +1466,10 @@ int main(int argc, char *argv[])
 			printf("send message C \n");
 
 		}
-		if (recevidMessage_D == 1)
+		if (recevidMessage_D == 1 && D_thread_flag == 1)
 		{
 			pthread_create(&id2, NULL, (void *)response_D, NULL);
+			D_thread_flag = 0; //表示D线程已开启
 		}
 		if (recevidMessage_T == 1)
 		{
@@ -1045,4 +1499,3 @@ int main(int argc, char *argv[])
 	mosquitto_lib_cleanup();
 	return run;
 }
-//主函数还没改完
