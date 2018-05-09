@@ -14,8 +14,7 @@
 #include "mosquitto.h"
 #include"modbus.h"
 #include"md5.h"//使用的libubox库
-#include "libxml/xmlmemory.h"
-#include "libxml/parser.h"
+#include "mxml.h"
 //#include "client_shared.h" //mosq_config的定义在这里
 
 pthread_mutex_t mutex;
@@ -23,10 +22,10 @@ pthread_mutex_t mutex;
 typedef enum { ASCII, UTF_8 }ENCODE;
 typedef struct
 {
-	xmlChar*	Remote_IP;
+	char*	Remote_IP;
 	int		    Remote_Port;
-	xmlChar*	Project_name;
-	//xmlChar*	UniCode;
+	char*	Project_name;
+	//char*	UniCode;
 	int			Compress;
 	int			Encrypt;
 	int  		Encoding;
@@ -103,23 +102,23 @@ typedef enum { None, Odd, Even }PARITY;
 typedef struct
 {
 	int			SlaveID;
-	xmlChar*	ClientID;
-	xmlChar*	Modbus_Serial_Type;
-	xmlChar*	Com_Port;
+	char*		ClientID;
+	char*		Modbus_Serial_Type;
+	char*		Com_Port;
 	int			Baud_Rate;
 	int			Data_bits;
-	xmlChar*	Parity;
+	char*		Parity;
 	int			Stop_bits;
-	xmlChar*	Client_IP;
+	char*		Client_IP;
 	int			Client_Port;
 }ModbusConfig;	
 #define ModbusConfig_initializer {1,"0-00000-000000-00000","TCP","/dev/ttyS0",9600,8,"N",1,"0.0.0.0",0000}
 ModbusConfig Modbus = ModbusConfig_initializer;
 
 #define CONFIGLENGTH 200
-xmlChar* ConfigEdition;//配置文件版本信息
+char* ConfigEdition;//配置文件版本信息
 int ChannelEdition;//PLC变量表版本号
-unsigned char UniCode[6]="TTTTTT";//存放由ClientID转换而来的半幅序列号,赋初值为"TTTTTT"
+char UniCode[6]="TTTTTT";//存放由ClientID转换而来的半幅序列号,赋初值为"TTTTTT"
 
 typedef enum {
 	coil = 1,
@@ -130,14 +129,14 @@ typedef enum {
 
 typedef struct
 {
-	xmlChar*	name;
+	char*		name;
 	int			DataType;
 	int			ModBusDataType;
 	int			ModbusAddr;
-	xmlChar*	DeviceDateType;
+	char*		DeviceDateType;
 	int			DeviceDateLen;
 	int			num;
-	xmlChar*	desc;
+	char*		desc;
 	int			ConvertionType;
 }Tab;//变量表
 Tab valueTab[CONFIGLENGTH];//配置文件中的变量总表
@@ -267,7 +266,7 @@ void buildWaitTab_T(void)
 	pthread_mutex_unlock(&mutex);//走出临界区，解锁
 }
 //ClientID转半幅序列号UniCode
-static unsigned char digits[64] = {
+static char digits[64] = {
 
 	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 	'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
@@ -277,17 +276,16 @@ static unsigned char digits[64] = {
 	'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
 	'Y', 'Z', '_', '@'
 };
-void ParseToGuo64(unsigned char* serialNumber, unsigned char* UniCode)
+void ParseToGuo64()
 {
 	char uu[] = "00000000000";
-	unsigned char* unicode;
-	unsigned char cost = ' ';
+	char cost = ' ';
 	long long clientNum = 0;
 	int i = 0;
 	int j = 0;
 	while (i < 2)
 	{
-		cost = serialNumber[j];
+		cost = Modbus.ClientID[j];
 		j++;
 		if (cost == '-')
 		{
@@ -297,10 +295,10 @@ void ParseToGuo64(unsigned char* serialNumber, unsigned char* UniCode)
 	i = 0;
 	while (cost != '\0')
 	{
-		cost = serialNumber[j];
+		cost = Modbus.ClientID[j];
 		if (cost != '-')
 		{
-			uu[i] = (char)cost;
+			uu[i] = cost;
 			i++;
 		}
 		j++;
@@ -317,245 +315,7 @@ void ParseToGuo64(unsigned char* serialNumber, unsigned char* UniCode)
 }
 
 //***********************************读取xml配置文件*******************************************************************************
-void ReadXmlNodeElement_mqtt_server(xmlNodePtr cur)
-{
-	xmlNodePtr curNodePtr = cur;  //创建一个临时变量用来存储cur
-	xmlChar* temp;
-	while (xmlStrcmp(cur->name, BAD_CAST"datacenter"))
-	{
-		cur = cur->next;
-	}
-	if (!xmlStrcmp(cur->name, BAD_CAST"datacenter"))
-	{
-		curNodePtr = cur;
-		xmlAttrPtr curAttrPtr = curNodePtr->properties;
-		while (curAttrPtr != NULL)
-		{
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ConfigEdition"))			//找到对应元素的名称
-			{
 
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"ConfigEdition");
-				ConfigEdition = temp;
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Remote_IP"))			//找到对应元素的名称
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Remote_IP");
-				Mqtt.Remote_IP = temp;
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Remote_Port"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Remote_Port");
-				Mqtt.Remote_Port = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"project_name"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"project_name");
-				Mqtt.Project_name = temp;
-			}
-			/*if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"UniCode"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"UniCode");
-				Mqtt.UniCode = temp;
-			}*/
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Compress"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Compress");
-				Mqtt.Compress = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Encrypt"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Encrypt");
-				Mqtt.Encrypt = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Encoding"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Encoding");
-				Mqtt.Encoding = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"keepalive"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"keepalive");
-				Mqtt.KeepAlive = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"pushTime"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"pushTime");
-				Mqtt.PushTime = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			curAttrPtr = curAttrPtr->next;
-		}
-
-	}
-}
-void ReadXmlNodeElement_modbus_client(xmlNodePtr cur)
-{
-	xmlNodePtr curNodePtr = cur;  //创建一个临时变量用来存储cur
-	xmlChar* temp;
-	printf("this is modbus1\n");
-	while (xmlStrcmp(cur->name, BAD_CAST"station"))
-	{
-		cur = cur->next;
-	}
-	if (!xmlStrcmp(cur->name, BAD_CAST"station"))
-	{
-		printf("this is modbus2\n");
-		curNodePtr = cur;
-		xmlAttrPtr curAttrPtr = curNodePtr->properties;
-		while (curAttrPtr != NULL)
-		{
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ChannelEdition"))	
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"ChannelEdition");
-				ChannelEdition = atoi((char*)temp);   
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"SlaveID"))			//找到对应元素的名称
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"SlaveID");
-				Modbus.SlaveID = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ClientID"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"ClientID");
-				Modbus.ClientID = temp;
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Modbus_Serial_Type"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Modbus_Serial_Type");
-				Modbus.Modbus_Serial_Type = temp;
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Com_Port"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Com_Port");
-				Modbus.Com_Port = temp;
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Baud_Rate"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Baud_Rate");
-				Modbus.Baud_Rate = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Data_bits"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Data_bits");
-				Modbus.Data_bits = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Parity"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Parity");
-				Modbus.Parity = temp;
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Stop_bits"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Stop_bits");
-				Modbus.Stop_bits = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Client_IP"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Client_IP");
-				Modbus.Client_IP = temp;   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Client_Port"))
-			{
-				temp = xmlGetProp(curNodePtr, (const xmlChar*)"Client_Port");
-				Modbus.Client_Port = atoi((char*)temp);   // temp 是xmlchar*类型的，atoi的实参类型为char*，需要强制转换
-			}
-			curAttrPtr = curAttrPtr->next;
-		}
-	}
-}
-void ReadXmlNodeElement_Channel(xmlNodePtr cur)				//将xml文件列表中Channel的相应元素读取到valueTab中
-{
-	xmlNodePtr curNodePtr = cur;  //创建一个临时变量用来存储cur
-	int i = 0;					  //计数变量
-	xmlChar* temp;
-	while (NULL != cur)
-	{
-		{
-			if (!xmlStrcmp(cur->name, BAD_CAST"channel"))
-			{
-				curNodePtr = cur;
-				xmlAttrPtr curAttrPtr = curNodePtr->properties;
-				while (curAttrPtr != NULL)
-				{
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"name"))			//找到对应元素的名称
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"name"); //(i + 1) / 2 - 5 这个表达式是为了将   循环的i转换为从0开始的数  需要优化
-						valueTab[i].name = temp;
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"Datetype"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"Datetype");
-						valueTab[i].DataType = atoi((char*)temp);
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"modbusType"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"modbusType");
-						valueTab[i].ModBusDataType = atoi((char*)temp);
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"modbusAddress"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"modbusAddress");
-						valueTab[i].ModbusAddr = atoi((char*)temp);
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"deviceDataType"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"deviceDataType");
-						valueTab[i].DeviceDateType = temp;
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"deviceDataLen"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"deviceDataLen");
-						valueTab[i].DeviceDateLen = atoi((char*)temp);
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"num"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"num");
-						//printf("%s || %d\n", xmlGetProp(curNodePtr, (const xmlChar*)"name"), i);
-						valueTab[i].num = atoi((char*)temp);
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"desc"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"desc");
-						valueTab[i].desc = temp;
-					}
-					if (!xmlStrcmp(curAttrPtr->name, BAD_CAST"ConvertionType"))
-					{
-						temp = xmlGetProp(curNodePtr, (const xmlChar*)"ConvertionType");
-						valueTab[i].ConvertionType = atoi((char*)temp);
-					}
-					curAttrPtr = curAttrPtr->next;
-				}
-				i++;
-			}
-		}
-		cur = cur->next;
-	}
-	SumCount = i;//此处给sumCount赋初值，初值的值为channel的个数
-}
-void print_xmlconfig(void)
-{
-	int i = 0;
-	while (i < 100)
-	{
-		if (valueTab[i].name != NULL)
-			printf("Name:%5s DT:%5d MBDT:%5d MBA:%5d DDT:%5s DDL:%5d N:%5d desc:%5s CT:%5d\n\n",
-			valueTab[i].name, valueTab[i].DataType, valueTab[i].ModBusDataType, valueTab[i].ModbusAddr, valueTab[i].DeviceDateType, valueTab[i].DeviceDateLen, valueTab[i].num, valueTab[i].desc, valueTab[i].ConvertionType);
-		i++;
-
-	}
-	printf("Remote_IP:%s Remote_Port:%d Project_name:%s Compress:%d Encrypt:%d Encoding:%d KeepAlive:%d PushTime:%d\n\n",
-		Mqtt.Remote_IP, Mqtt.Remote_Port, Mqtt.Project_name, Mqtt.Compress, Mqtt.Encrypt, Mqtt.Encoding, Mqtt.KeepAlive, Mqtt.PushTime);
-	printf("SlaveID:%d ClientID:%s Modbus_Serial_Type:%s Com_Port:%s Baud_Rate:%d Data_bits:%d Parity:%s Stop_bits:%d\n\n",
-		Modbus.SlaveID, Modbus.ClientID, Modbus.Modbus_Serial_Type, Modbus.Com_Port, Modbus.Baud_Rate, Modbus.Data_bits, Modbus.Parity, Modbus.Stop_bits);
-	printf("ConfigEdition:%s\n", ConfigEdition);
-}
-void ReadXmlNodeElement(xmlNodePtr cur)		//这个函数是读取xml文件内容的函数，为了方便阅读，分成三个小的函数
-{
-
-	cur = cur->xmlChildrenNode;
-	ReadXmlNodeElement_mqtt_server(cur);
-	ReadXmlNodeElement_modbus_client(cur);
-	ReadXmlNodeElement_Channel(cur);
-}
 int sortConfig(void)
 {
 	int i = 0;
@@ -574,10 +334,10 @@ int sortConfig(void)
 			if (j>0)									 //冒泡排序
 			for (jj = 0; jj<j; jj++)
 			for (kk = 0; kk<j - jj; kk++)
-			if (HoldregisterTab[kk].ModbusAddr>HoldregisterTab[kk + 1].ModbusAddr)
 			{
 				swap(&HoldregisterTab[kk].ModbusAddr, &HoldregisterTab[kk + 1].ModbusAddr);        //？？？这是把序号、地址、数据长度按照地址大小进行了排序，但是为什么不是整个结构体都排序呢？
-				swap(&HoldregisterTab[kk].num, &HoldregisterTab[kk + 1].num);
+					if (HoldregisterTab[kk].ModbusAddr>HoldregisterTab[kk + 1].ModbusAddr)
+		swap(&HoldregisterTab[kk].num, &HoldregisterTab[kk + 1].num);
 				swap(&HoldregisterTab[kk].DeviceDateLen, &HoldregisterTab[kk + 1].DeviceDateLen);
 			}
 			j++;
@@ -623,47 +383,93 @@ int sortConfig(void)
 	printf("===============================================\n");
 	return 0;
 }
-int readConfig(int argc,char* argv[])
+int readConfig()
 {
-	xmlDocPtr doc;
-	xmlNodePtr cur;
+	int i;
+	FILE *fp = NULL;
+	mxml_node_t *tree, *conf, *datacenter, *station;
+	mxml_node_t *channel, *url;
+	fp = fopen("conf.xml", "r");
+	if (fp == NULL)
+	{
+		printf("sorry,cannot open xml\n");
 
-	char* szDocName;
-	if (argc <= 1)
-	{
-		printf("Usage: %s docname\n", argv[0]);
-		return(0);
 	}
-	szDocName = argv[1];
-	doc = xmlReadFile(szDocName, "UTF-8", XML_PARSE_RECOVER);
-	if (NULL == doc)
+	tree = mxmlLoadFile(NULL, fp, MXML_TEXT_CALLBACK);
+	fclose(fp);
+	if (tree == NULL)
 	{
-		fprintf(stderr, "Document not patibleparsed successfully.");
+		printf("Load file error!\n");
 		return -1;
-	}
-
-	cur = xmlDocGetRootElement(doc);
-	//printStructure(cur);
-	if (NULL == cur)
+	}	
+	conf = mxmlFindElement(tree, tree, "conf", NULL, NULL, MXML_DESCEND);
+	if (conf == NULL)
 	{
-		fprintf(stderr, "empty document\n");
-		xmlFreeDoc(doc);
+		printf("can not find element node!\n");
 		return -1;
-	}
-
-	if (xmlStrcmp(cur->name, BAD_CAST"conf"))
+	}	datacenter = mxmlFindElement(conf, tree, "datacenter", NULL, NULL, MXML_DESCEND);
+	station = mxmlFindElement(conf, tree, "station", NULL, NULL, MXML_DESCEND);
+	channel = mxmlFindElement(conf, tree, "channel", NULL, NULL, MXML_DESCEND);
+	while (datacenter)
 	{
-		fprintf(stderr, "document of the wrong type, root node != conf");
-		xmlFreeDoc(doc);
-		return -1;
+		ConfigEdition = (char*)mxmlElementGetAttr(datacenter, "ConfigEdition");
+		Mqtt.Remote_IP = (char*)mxmlElementGetAttr(datacenter, "Remote_IP");
+		Mqtt.Remote_Port = atoi((char*)mxmlElementGetAttr(datacenter, "Remote_Port"));
+		Mqtt.Project_name = (char*)mxmlElementGetAttr(datacenter, "project_name");
+		Mqtt.Compress = atoi((char*)mxmlElementGetAttr(datacenter, "Compress"));
+		Mqtt.Encrypt = atoi((char*)mxmlElementGetAttr(datacenter, "Encrypt"));
+		Mqtt.Encoding = atoi((char*)mxmlElementGetAttr(datacenter, "Encoding"));
+		Mqtt.KeepAlive = atoi((char*)mxmlElementGetAttr(datacenter, "keepalive"));
+		Mqtt.PushTime = atoi((char*)mxmlElementGetAttr(datacenter, "pushTime"));
+		//printf("%s %s %d",ConfigEdition,Mqtt.Remote_IP,Mqtt.Remote_Port);
+		datacenter = mxmlFindElement(datacenter, tree, "datacenter", NULL, NULL, MXML_DESCEND);
 	}
 
-	ReadXmlNodeElement(cur);
-	print_xmlconfig();
-	xmlFreeDoc(doc);
+
+	while (station)
+	{
+		ChannelEdition = atoi((char*)mxmlElementGetAttr(station, "ChannelEdition"));
+		Modbus.SlaveID = atoi((char*)mxmlElementGetAttr(station, "SlaveID"));
+		Modbus.ClientID = (char*)mxmlElementGetAttr(station, "ClientID");
+		Modbus.Modbus_Serial_Type = (char*)mxmlElementGetAttr(station, "Modbus_Serial_Type");
+		Modbus.Com_Port = (char*)mxmlElementGetAttr(station, "Com_Port");
+		Modbus.Baud_Rate = atoi((char*)mxmlElementGetAttr(station, "Baud_Rate"));
+		Modbus.Data_bits = atoi((char*)mxmlElementGetAttr(station, "Data_bits"));
+		Modbus.Parity = (char*)mxmlElementGetAttr(station, "Parity");
+		Modbus.Stop_bits = atoi((char*)mxmlElementGetAttr(station, "Stop_bits"));
+		Modbus.Client_IP = (char*)mxmlElementGetAttr(station, "Client_IP");
+		Modbus.Client_Port = atoi((char*)mxmlElementGetAttr(station, "Client_Port"));
+		//printf("ceshi1:%s", Modbus.ClientID);
+		station = mxmlFindElement(station, tree, "station", NULL, NULL, MXML_DESCEND);
+	}
+	//printf("ceshi2:%s", Modbus.ClientID);
+
+
+
+	i = 0;
+	while (channel)
+	{
+		valueTab[i].name = (char*)mxmlElementGetAttr(channel, "name");
+		valueTab[i].DataType = atoi((char*)mxmlElementGetAttr(channel, "Datetype"));
+		valueTab[i].ModBusDataType = atoi((char*)mxmlElementGetAttr(channel, "modbusType"));
+		valueTab[i].ModbusAddr = atoi((char*)mxmlElementGetAttr(channel, "modbusAddress"));
+		valueTab[i].DeviceDateType = (char*)mxmlElementGetAttr(channel, "deviceDataType");
+		valueTab[i].DeviceDateLen = atoi((char*)mxmlElementGetAttr(channel, "deviceDataLen"));
+		valueTab[i].num = atoi((char*)mxmlElementGetAttr(channel, "num"));
+		valueTab[i].desc = (char*)mxmlElementGetAttr(channel, "desc");
+		valueTab[i].ConvertionType = atoi((char*)mxmlElementGetAttr(channel, "ConvertionType"));
+		//printf("Name:%5s DT:%5d MBDT:%5d MBA:%5d DDT:%5s DDL:%5d N:%5d desc:%5s CT:%5d\n\n",
+		//	valueTab[i].name, valueTab[i].DataType, valueTab[i].ModBusDataType, valueTab[i].ModbusAddr, valueTab[i].DeviceDateType, valueTab[i].DeviceDateLen, valueTab[i].num, valueTab[i].desc, valueTab[i].ConvertionType);
+
+		i++;
+		channel = mxmlFindElement(channel, tree, "channel", NULL, NULL, MXML_DESCEND);
+	}
+	SumCount = i;//此处给sumCount赋初值，初值的值为channel的个数
 
 	sortConfig();//排序
+
 	buildCtrl();//生成控制字
+	//mxmlDelete(tree);//这个问题有待解决，不注释掉的话，ModBus.ClientID就会有问题，不能理解；但是考虑到不会有内存溢出，先这样吧
 	return 1;
 }
 void TopicNaming()
@@ -980,7 +786,7 @@ char* buildJson(void)
 	//char tempC[1000];//消息C 临时存放量 用来生成Json		<<<< buildJson
 	char* tempC;
 	tempC = (char*)malloc(sizeof(char)*(100 * SumCount + 29));//29为Json上下行的字节数，100为每行的字节数
-	offsetC += sprintf(tempC, "{\"ver\":%s,\"taglst\":[", ChannelEdition);
+	offsetC += sprintf(tempC, "{\"ver\":%d,\"taglst\":[", ChannelEdition);
 	for (i = 0; i<SumCount; i++)
 		offsetC += sprintf(tempC + offsetC, "{\"nam\":\"%s\",\"dsc\":\"%s\",\"addr\":%d,\"vt\":%d},", valueTab[i].name, valueTab[i].desc, valueTab[i].num, valueTab[i].DataType);
 	offsetC += sprintf(tempC + offsetC - 1, "]}");
@@ -1416,8 +1222,8 @@ int main(int argc, char *argv[])
 {
 
 	pthread_t id1, id2;
-	readConfig(argc,argv);
-	ParseToGuo64(Modbus.ClientID, UniCode);//将设备的ClientID转化为UniCode，以便于构建消息topic
+	readConfig();
+	ParseToGuo64();//将设备的ClientID转化为UniCode，以便于构建消息topic
 	printf("UniCode:%6s\n", UniCode);//测试用
 	TopicNaming();
 
